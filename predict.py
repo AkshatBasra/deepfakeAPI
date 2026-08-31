@@ -10,16 +10,17 @@ model = None
 
 def load_model():
     global model
-    if config.DEV_NO_MODEL:
-        print("Warn:     DEV_NO_MODEL is enabled; skipping model load.")
-        return
+
 
     if model is None:
         try:
-            print(f"Loading model from {config.MODEL_PATH}...")
-            # Using compile=False is safer for inference only, sometimes custom losses cause issues
-            model = tf.keras.models.load_model(config.MODEL_PATH, compile=False)
-            print("Model loaded successfully.")
+            if config.DEV_NO_MODEL:
+                print("Warn:     DEV_NO_MODEL is enabled; skipping model load.")
+            else:
+                print(f"Loading model from {config.MODEL_PATH}...")
+                # Using compile=False is safer for inference only, sometimes custom losses cause issues
+                model = tf.keras.models.load_model(config.MODEL_PATH, compile=False)
+                print("Model loaded successfully.")
         except Exception as e:
             print(f"Error loading model: {e}")
             # We don't raise here to allow building the app, but inference will fail if model is missing

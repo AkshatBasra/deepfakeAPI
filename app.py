@@ -18,6 +18,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 UPLOAD_DIR = "tmp"
 
 @app.get("/")
@@ -69,7 +70,8 @@ async def predict_endpoint(file: UploadFile = File(...)):
         # 4. Face Extraction & Preprocessing
         # Returns: (1, SEQUENCE, H, W, C)
         try:
-            input_batch = face_extraction.process_video(temp_path)
+            # input_batch = face_extraction.process_video(temp_path)  # Commented for dummy deployment
+            input_batch = []
         except ValueError as e:
             print("Error:    No Face Detected")
             raise HTTPException(status_code=400, detail=str(e)) # No face, etc.
