@@ -1,8 +1,6 @@
 fastapi
 uvicorn
 python-multipart 
-tensorflow  # We use CPU-only inference, and tensorflow-cpu is lighter, faster to install, and avoids unnecessary GPU dependencies that can break free cloud deployments.
-tf-keras
 opencv-python-headless #The headless version removes GUI dependencies, making it more stable and compatible for server-side and cloud environments where no display is available.
 retina-face
 numpy

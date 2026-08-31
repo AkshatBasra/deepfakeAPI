@@ -2,10 +2,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
-import shutil
 import tempfile
 
-import config
 import utils
 import face_extraction
 import predict
