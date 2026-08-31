@@ -1,7 +1,8 @@
 fastapi
 uvicorn
 python-multipart 
-opencv-python-headless #The headless version removes GUI dependencies, making it more stable and compatible for server-side and cloud environments where no display is available.
+tensorflow
+opencv-python-headless
 retina-face
 numpy
 pillow
