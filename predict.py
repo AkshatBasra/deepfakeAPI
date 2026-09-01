@@ -4,6 +4,19 @@ import config
 from gradcam import make_gradcam_heatmap, generate_heatmap_overlay
 import cv2
 import base64
+import os
+
+def log_memory(step_name: str):
+    """Prints the current memory usage of the Python process."""
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if 'VmRSS' in line:
+                    mem_mb = int(line.split()[1]) / 1024
+                    print(f"MEMORY STAGE [{step_name}]: {mem_mb:.2f} MB used")
+                    break
+    except Exception:
+        print(f"MEMORY STAGE [{step_name}]: (Memory info unavailable)")
 
 # Global model variable
 model = None
@@ -17,10 +30,12 @@ def load_model():
             if config.DEV_NO_MODEL:
                 print("Warn:     DEV_NO_MODEL is enabled; skipping model load.")
             else:
+                log_memory("5. Before Loading TF Model (If any)")
                 print(f"Loading model from {config.MODEL_PATH}...")
                 # Using compile=False is safer for inference only, sometimes custom losses cause issues
                 model = tf.keras.models.load_model(config.MODEL_PATH, compile=False)
                 print("Model loaded successfully.")
+                log_memory("6. After Loading TF Model")
         except Exception as e:
             print(f"Error loading model: {e}")
             # We don't raise here to allow building the app, but inference will fail if model is missing
