@@ -12,45 +12,31 @@ def extract_frames(video_path: str):
     if not cap.isOpened():
         return []
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frames = []
-    print("Info:     Called Frame Extraction")
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frames = []
+        print("Info:     Called Frame Extraction")
 
-    if total_frames <= 0:
-        cap.release()
-        return frames
+        if total_frames <= 0:
+            return frames
 
-    sample_count = min(config.SEQUENCE_LENGTH, total_frames)
-    sample_indices = np.linspace(0, total_frames - 1, sample_count, dtype=int)
-    print(f"Info:     Sampling {sample_count} of {total_frames} frames")
+        sample_count = min(config.SEQUENCE_LENGTH, total_frames)
+        sample_indices = np.linspace(0, total_frames - 1, sample_count, dtype=int)
+        print(f"Info:     Sampling {sample_count} of {total_frames} frames")
 
-    for frame_index in sample_indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            continue
-
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frames.append(frame_rgb)
-
-    # Fallback if seeking failed or CAP_PROP_FRAME_COUNT was inaccurate.
-    if len(frames) < config.SEQUENCE_LENGTH:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        all_raw_frames = []
-        while True:
+        for frame_index in sample_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
             ret, frame = cap.read()
             if not ret or frame is None:
-                break
-            all_raw_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                continue
 
-        if len(all_raw_frames) >= config.SEQUENCE_LENGTH:
-            indices = np.linspace(0, len(all_raw_frames) - 1, config.SEQUENCE_LENGTH, dtype=int)
-            frames = [all_raw_frames[i] for i in indices]
-        else:
-            frames = all_raw_frames
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
 
-    cap.release()
-    return frames
+        return frames
+    finally:
+        cap.release()
+
 
 def detect_and_crop_face(frame):
     """
