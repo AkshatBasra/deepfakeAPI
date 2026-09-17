@@ -30,67 +30,56 @@ def extract_frames(video_path: str):
             if not ret or frame is None:
                 continue
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
+            frames.append(frame)
 
         return frames
     finally:
         cap.release()
 
 
-def detect_and_crop_face(frame):
-    """
-    Detects the most prominent face in the frame using RetinaFace.
-    Returns the cropped and resized face image, or None if no face found.
-    """
-    # RetinaFace.detect_faces returns a dictionary where keys are 'face_1', 'face_2', etc.
-    # We need to handle potential empty results or errors.
+def detect_and_align_face(image_bgr: np.ndarray, target_size: int = 224, max_rotation_deg: float = 40.0):
     try:
-        resp = RetinaFace.detect_faces(frame)
+        detections = RetinaFace.detect_faces(image_bgr)
     except Exception as e:
         print(f"RetinaFace error: {e}")
         return None
 
-    if not resp or isinstance(resp, tuple):
+    if not isinstance(detections, dict) or len(detections) == 0:
         return None
 
-    # Find the largest face (most prominent)
-    max_area = 0
-    best_face_area = None
+    # Find best face based on 'score'
+    best_key = max(detections, key=lambda k: detections[k]["score"])
+    face = detections[best_key]
+    landmarks = face["landmarks"]
 
-    for key in resp:
-        face_info = resp[key]
-        facial_area = face_info['facial_area']
-        x1, y1, x2, y2 = facial_area
+    eye_a = np.array(landmarks["left_eye"], dtype=np.float32)
+    eye_b = np.array(landmarks["right_eye"], dtype=np.float32)
+    left_eye, right_eye = (eye_a, eye_b) if eye_a[0] <= eye_b[0] else (eye_b, eye_a)
 
-        width = x2 - x1
-        height = y2 - y1
-        area = width * height
+    dy, dx = right_eye[1] - left_eye[1], right_eye[0] - left_eye[0]
+    angle = float(np.degrees(np.arctan2(dy, dx)))
 
-        if area > max_area:
-            max_area = area
-            best_face_area = facial_area
+    aligned = image_bgr
+    if abs(angle) <= max_rotation_deg:
+        eyes_center = tuple(((left_eye + right_eye) / 2).astype(np.float32).tolist())
+        rot_mat = cv2.getRotationMatrix2D(eyes_center, angle, 1.0)
+        aligned = cv2.warpAffine(image_bgr, rot_mat, (image_bgr.shape[1], image_bgr.shape[0]))
 
-    if best_face_area is not None:
-        x1, y1, x2, y2 = best_face_area
+    x1, y1, x2, y2 = face["facial_area"]
+    w, h = x2 - x1, y2 - y1
+    mx, my = int(config.FACE_MARGIN * w), int(config.FACE_MARGIN * h)
+    x1, y1 = max(0, x1 - mx), max(0, y1 - my)
+    x2, y2 = min(aligned.shape[1], x2 + mx), min(aligned.shape[0], y2 + my)
 
-        # Ensure coordinates are within image bounds.
-        h, w, _ = frame.shape
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(w, x2)
-        y2 = min(h, y2)
+    crop = aligned[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+        
+    try:
+        return cv2.resize(crop, (target_size, target_size))
+    except Exception:
+        return None
 
-        face_img = frame[y1:y2, x1:x2]
-
-        # Resize to input dimensions.
-        try:
-            face_resized = cv2.resize(face_img, (config.INPUT_WIDTH, config.INPUT_HEIGHT))
-            return face_resized
-        except Exception:
-            return None
-
-    return None
 
 def process_video(video_path: str):
     """
@@ -108,9 +97,10 @@ def process_video(video_path: str):
     processed_faces = []
     print("Info:     RetinaFace Called")
     for frame in raw_frames:
-        face = detect_and_crop_face(frame)
-        if face is not None:
-            processed_faces.append(face)
+        face_bgr = detect_and_align_face(frame, target_size=config.INPUT_WIDTH, max_rotation_deg=config.MAX_ROTATION_DEG)
+        if face_bgr is not None:
+            face_rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
+            processed_faces.append(face_rgb)
 
     print("Info:     RetinaFace Completed")
     if not processed_faces:
@@ -128,10 +118,4 @@ def process_video(video_path: str):
     else:
         final_sequence = processed_faces
 
-    print("Info:     Frame Normalisation Called")
-    sequence_array = np.array(final_sequence, dtype=np.float32)
-    sequence_array /= 255.0
-
-    batch_input = np.expand_dims(sequence_array, axis=0)
-    print("Info:     Face normalisation Completed")
-    return batch_input
+    return final_sequence
