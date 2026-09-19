@@ -55,19 +55,22 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def load_model():
     global model
     if model is None:
+        if config.DEV_NO_MODEL:
+            print("Warn:     DEV_NO_MODEL is enabled; skipping model load.")
+            return
+
         try:
-            if config.DEV_NO_MODEL:
-                print("Warn:     DEV_NO_MODEL is enabled; skipping model load.")
-            else:
-                print(f"Loading model from {config.MODEL_PATH}...")
-                model = DeepfakeDetectorPhase1()
-                # Use map_location=device to load correctly on CPU or GPU
-                model.load_state_dict(torch.load(config.MODEL_PATH, map_location=device))
-                model.to(device).eval()
-                print("Model loaded successfully.")
+            print(f"Loading model from {config.MODEL_PATH}...")
+            model = DeepfakeDetectorPhase1()
+            # The phase-1 notebook exports model.state_dict() to best.pt.
+            state_dict = torch.load(config.MODEL_PATH, map_location=device)
+            model.load_state_dict(state_dict)
+            model.to(device).eval()
+            print("Model loaded successfully.")
         except Exception as e:
-            print(f"Error loading model: {e}")
-            model = None
+            raise RuntimeError(
+                f"Could not load phase-1 model from {config.MODEL_PATH}: {e}"
+            ) from e
 
 def run_inference(input_frames: list):
     """
@@ -87,7 +90,7 @@ def run_inference(input_frames: list):
                     "confidence": confidence_score,
                     "heatmap": None
                 }
-            raise RuntimeError("Model could not be loaded. Please check config/paths.")
+            raise RuntimeError("Model is not loaded.")
 
     # 1. Transform and Batch
     tensors = []

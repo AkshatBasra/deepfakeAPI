@@ -7,6 +7,7 @@ timm
 albumentations
 opencv-python-headless
 retina-face
+tensorflow
+tf-keras
 numpy
 pillow
-

@@ -28,7 +28,7 @@ JOB_STORE = {}
 
 
 def process_prediction(video_path: str):
-    """Run the existing RetinaFace + inference pipeline for a saved video."""
+    """Run the phase-1 RetinaFace + CNN inference pipeline for a saved video."""
     # 1. Check Duration
     duration = utils.check_video_duration(video_path)
     print("Info:     Input File Validated")

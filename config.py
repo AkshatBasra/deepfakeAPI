@@ -13,8 +13,8 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 FAKE_THRESHOLD = 0.5        # Threshold for "fake" classification
 
 # ========== DEV MODE ==========
-# Demo mode is enabled by default until a real model is configured.
-DEV_NO_MODEL = True # os.getenv("DEV_NO_MODEL", "True").strip().lower() == "true"
+# Keep demo mode disabled for normal operation. Enable only for local UI testing.
+DEV_NO_MODEL = False
 
 # ========== GRAD-CAM ==========
 ENABLE_GRADCAM = False      # Enable/Disable Grad-CAM
@@ -24,6 +24,6 @@ GRADCAM_LAYER_NAME = "cnn.backbone.conv_head"
 # ========== PATHS ==========
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "model")
-# User must update this filename to match the actual uploaded model file
-MODEL_FILENAME = "best.pt" 
+# The phase-1 notebook writes this state dict as best.pt.
+MODEL_FILENAME = "best.pt"
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
