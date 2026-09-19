@@ -1,10 +1,13 @@
 fastapi
 uvicorn
 python-multipart 
-tensorflow
-tf-keras
+torch
+torchvision
+timm
+albumentations
 opencv-python-headless
 retina-face
+tensorflow
+tf-keras
 numpy
 pillow
-

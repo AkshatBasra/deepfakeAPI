@@ -14,6 +14,7 @@ venv.bak/
 test_data/
 tmp/
 model/
+scripts/
 
 # Model files
 *.h5
