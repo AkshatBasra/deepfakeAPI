@@ -60,13 +60,13 @@ def load_model():
             return
 
         try:
-            print(f"Loading model from {config.MODEL_PATH}...")
+            print(f"Info:     Loading model from {config.MODEL_PATH}...")
             model = DeepfakeDetectorPhase1()
             # The phase-1 notebook exports model.state_dict() to best.pt.
             state_dict = torch.load(config.MODEL_PATH, map_location=device)
             model.load_state_dict(state_dict)
             model.to(device).eval()
-            print("Model loaded successfully.")
+            print("Info:     Model loaded successfully.")
         except Exception as e:
             raise RuntimeError(
                 f"Could not load phase-1 model from {config.MODEL_PATH}: {e}"
@@ -78,6 +78,7 @@ def run_inference(input_frames: list):
     Returns: dictionary with prediction, confidence, heatmap
     """
     global model
+    print(f"Info:     Inference started with {len(input_frames)} frame(s)")
     if model is None:
         load_model()
         if model is None:
@@ -85,11 +86,14 @@ def run_inference(input_frames: list):
                 import random
                 confidence_score = round(random.uniform(0.3, 0.95), 2)
                 is_fake = confidence_score >= config.FAKE_THRESHOLD
-                return {
+                result = {
                     "prediction": "fake" if is_fake else "real",
                     "confidence": confidence_score,
                     "heatmap": None
                 }
+                print(f"Info:     Demo inference result: {result}")
+                print("Info:     Sending prediction result")
+                return result
             raise RuntimeError("Model is not loaded.")
 
     # 1. Transform and Batch
@@ -99,6 +103,8 @@ def run_inference(input_frames: list):
         tensors.append(tensor)
     
     batch = torch.stack(tensors).to(device) # Shape: (T, 3, 224, 224)
+    print(f"Info:     Inference batch shape: {tuple(batch.shape)}")
+    print(f"Info:     Inference device: {device}")
 
     # 2. Forward Pass
     try:
@@ -107,6 +113,15 @@ def run_inference(input_frames: list):
             probs = torch.sigmoid(logits)
             # Phase 1: Aggregate probabilities across all valid frames (mean)
             confidence_score = probs.mean().item()
+            print(
+                "Info:     Frame logits: "
+                f"{[round(float(value), 4) for value in logits.detach().cpu()]}"
+            )
+            print(
+                "Info:     Frame fake probabilities: "
+                f"{[round(float(value), 4) for value in probs.detach().cpu()]}"
+            )
+            print(f"Info:     Mean fake probability: {confidence_score:.4f}")
     except Exception as e:
          raise RuntimeError(f"Inference failed: {e}")
     
@@ -133,8 +148,11 @@ def run_inference(input_frames: list):
             print(f"Grad-CAM generation failed: {e}")
             heatmap_b64 = None
 
-    return {
+    result = {
         "prediction": prediction_label,
         "confidence": confidence_score,
         "heatmap": heatmap_b64
     }
+    print(f"Info:     Final prediction result: {result}")
+    print("Info:     Sending prediction result")
+    return result
