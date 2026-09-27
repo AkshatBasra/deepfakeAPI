@@ -12,10 +12,6 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 FAKE_THRESHOLD = 0.5        # Threshold for "fake" classification
 
-# ========== DEV MODE ==========
-# Keep demo mode disabled for normal operation. Enable only for local UI testing.
-DEV_NO_MODEL = False
-
 # ========== GRAD-CAM ==========
 ENABLE_GRADCAM = False      # Enable/Disable Grad-CAM
 # NOTE: Update this layer name to match the last convolutional layer of your specific model
@@ -24,6 +20,6 @@ GRADCAM_LAYER_NAME = "cnn.backbone.conv_head"
 # ========== PATHS ==========
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "model")
-# The phase-1 notebook writes this state dict as best.pt.
-MODEL_FILENAME = "best.pt"
+# Set this to the final CNN + LSTM checkpoint filename.
+MODEL_FILENAME = "truveoai_cnn_lstm_hybrid.pt"
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
