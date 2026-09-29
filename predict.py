@@ -3,155 +3,206 @@ import torch.nn as nn
 import timm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-import numpy as np
-import config
-from gradcam import make_gradcam_heatmap, generate_heatmap_overlay
-import cv2
-import base64
 
-# Define transforms
+import config
+
+
 eval_transform = A.Compose([
     A.Normalize(mean=config.IMAGENET_MEAN, std=config.IMAGENET_STD),
     ToTensorV2(),
 ])
 
+
 class CNNFeatureExtractor(nn.Module):
-    def __init__(self, backbone_name: str = "efficientnet_b0", pretrained: bool = False):
+    """Phase-1 EfficientNet-B0 feature extractor."""
+
+    def __init__(self) -> None:
         super().__init__()
-        self.backbone = timm.create_model(backbone_name, pretrained=pretrained, num_classes=0)
+        self.backbone = timm.create_model(
+            "efficientnet_b0",
+            pretrained=False,
+            num_classes=0,
+        )
         self.feature_dim = self.backbone.num_features
 
-    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.extract_features(x)
 
-class BinaryClassifierHead(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int = 256, dropout: float = 0.3):
+class TemporalAttentionLSTM(nn.Module):
+    """Attention-weighted LSTM head from the phase-2 checkpoint."""
+
+    def __init__(
+        self,
+        input_size: int = 1280,
+        hidden_size: int = 256,
+        num_layers: int = 2,
+        dropout: float = 0.3,
+    ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.ReLU(inplace=True),
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+        )
+        self.attention = nn.ModuleDict({
+            "score": nn.Sequential(
+                nn.Linear(hidden_size, 128),
+                nn.Tanh(),
+                nn.Linear(128, 1),
+            ),
+        })
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size, 128),
+            nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(128, 1),
         )
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.net(features).squeeze(-1)  # (B,) raw logits
+        lstm_output, _ = self.lstm(features)
+        attention_scores = self.attention["score"](lstm_output)
+        attention_weights = torch.softmax(attention_scores, dim=1)
+        context = (attention_weights * lstm_output).sum(dim=1)
+        return self.classifier(context).squeeze(-1)
 
-class DeepfakeDetectorPhase1(nn.Module):
-    def __init__(self):
+
+class CNNAttentionLSTM(nn.Module):
+    """EfficientNet-B0 frames followed by the phase-2 attention head."""
+
+    def __init__(
+        self,
+        cnn: CNNFeatureExtractor,
+        temporal_head: TemporalAttentionLSTM,
+    ) -> None:
         super().__init__()
-        self.cnn = CNNFeatureExtractor("efficientnet_b0", pretrained=False)
-        self.classifier = BinaryClassifierHead(self.cnn.feature_dim)
+        self.cnn = cnn
+        self.temporal_head = temporal_head
+
+        for parameter in self.cnn.parameters():
+            parameter.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.classifier(self.cnn.extract_features(x))
+        batch_size, sequence_length, channels, height, width = x.shape
+        frames = x.reshape(
+            batch_size * sequence_length,
+            channels,
+            height,
+            width,
+        )
 
-model = None
+        with torch.no_grad():
+            features = self.cnn(frames)
+
+        features = features.reshape(batch_size, sequence_length, -1)
+        return self.temporal_head(features)
+
+
+model: CNNAttentionLSTM | None = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def load_model():
-    global model
-    if model is None:
-        if config.DEV_NO_MODEL:
-            print("Warn:     DEV_NO_MODEL is enabled; skipping model load.")
-            return
 
-        try:
-            print(f"Info:     Loading model from {config.MODEL_PATH}...")
-            model = DeepfakeDetectorPhase1()
-            # The phase-1 notebook exports model.state_dict() to best.pt.
-            state_dict = torch.load(config.MODEL_PATH, map_location=device)
-            model.load_state_dict(state_dict)
-            model.to(device).eval()
-            print("Info:     Model loaded successfully.")
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not load phase-1 model from {config.MODEL_PATH}: {e}"
-            ) from e
+def _load_state_dict(path: str) -> dict:
+    checkpoint = torch.load(path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        return checkpoint
+    if isinstance(checkpoint, dict):
+        return {"model_state_dict": checkpoint}
+    raise TypeError(f"Checkpoint at {path} is not a state dictionary.")
 
-def run_inference(input_frames: list):
+
+def _load_backbone() -> CNNFeatureExtractor:
+    checkpoint = _load_state_dict(config.CNN_BACKBONE_PATH)
+    backbone_state = checkpoint["model_state_dict"]
+    state_dict = {
+        key.removeprefix("backbone."): value
+        for key, value in backbone_state.items()
+        if key.startswith("backbone.")
+    }
+    if not state_dict:
+        raise RuntimeError(
+            f"CNN checkpoint {config.CNN_BACKBONE_PATH} has no backbone weights."
+        )
+
+    cnn = CNNFeatureExtractor()
+    cnn.backbone.load_state_dict(state_dict)
+    cnn.eval()
+    return cnn
+
+
+def load_model() -> None:
+    global model
+
+    if model is not None:
+        return
+
+    try:
+        print(f"Info:     Loading CNN backbone from {config.CNN_BACKBONE_PATH}...")
+        cnn = _load_backbone()
+
+        print(f"Info:     Loading attention head from {config.MODEL_PATH}...")
+        attention_checkpoint = _load_state_dict(config.MODEL_PATH)
+        temporal_head = TemporalAttentionLSTM()
+        temporal_head.load_state_dict(
+            attention_checkpoint["model_state_dict"]
+        )
+
+        model = CNNAttentionLSTM(cnn=cnn, temporal_head=temporal_head)
+        model.to(device).eval()
+        print("Info:     CNN + attention LSTM model loaded successfully.")
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        model = None
+        raise RuntimeError(
+            f"Could not load CNN + attention LSTM model: {exc}"
+        ) from exc
+
+
+def run_inference(input_frames: list) -> dict:
     """
-    Runs prediction on the input sequence of frames (RGB numpy arrays).
-    Returns: dictionary with prediction, confidence, heatmap
+    Predict whether an eight-frame RGB face sequence is fake or real.
+
+    Returns a video-level fake probability and prediction label.
     """
     global model
+
     print(f"Info:     Inference started with {len(input_frames)} frame(s)")
+    if len(input_frames) != config.SEQUENCE_LENGTH:
+        raise ValueError(
+            f"Expected {config.SEQUENCE_LENGTH} face frames, "
+            f"received {len(input_frames)}."
+        )
+
     if model is None:
         load_model()
-        if model is None:
-            if config.DEV_NO_MODEL:
-                import random
-                confidence_score = round(random.uniform(0.3, 0.95), 2)
-                is_fake = confidence_score >= config.FAKE_THRESHOLD
-                result = {
-                    "prediction": "fake" if is_fake else "real",
-                    "confidence": confidence_score,
-                    "heatmap": None
-                }
-                print(f"Info:     Demo inference result: {result}")
-                print("Info:     Sending prediction result")
-                return result
-            raise RuntimeError("Model is not loaded.")
+    if model is None:
+        raise RuntimeError("Model is not loaded.")
 
-    # 1. Transform and Batch
-    tensors = []
-    for frame in input_frames:
-        tensor = eval_transform(image=frame)["image"]
-        tensors.append(tensor)
-    
-    batch = torch.stack(tensors).to(device) # Shape: (T, 3, 224, 224)
-    print(f"Info:     Inference batch shape: {tuple(batch.shape)}")
+    tensors = [
+        eval_transform(image=frame)["image"]
+        for frame in input_frames
+    ]
+    sequence = torch.stack(tensors).unsqueeze(0).to(device)
+
+    print(f"Info:     Inference input shape: {tuple(sequence.shape)}")
     print(f"Info:     Inference device: {device}")
 
-    # 2. Forward Pass
     try:
         with torch.no_grad():
-            logits = model(batch)
-            probs = torch.sigmoid(logits)
-            # Phase 1: Aggregate probabilities across all valid frames (mean)
-            confidence_score = probs.mean().item()
-            print(
-                "Info:     Frame logits: "
-                f"{[round(float(value), 4) for value in logits.detach().cpu()]}"
-            )
-            print(
-                "Info:     Frame fake probabilities: "
-                f"{[round(float(value), 4) for value in probs.detach().cpu()]}"
-            )
-            print(f"Info:     Mean fake probability: {confidence_score:.4f}")
-    except Exception as e:
-         raise RuntimeError(f"Inference failed: {e}")
-    
-    # 3. Decision Logic
+            logit = model(sequence)
+            confidence_score = torch.sigmoid(logit).item()
+    except (RuntimeError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"Inference failed: {exc}") from exc
+
+    print(f"Info:     Video fake probability: {confidence_score:.4f}")
+
     is_fake = confidence_score >= config.FAKE_THRESHOLD
     prediction_label = "fake" if is_fake else "real"
-    
-    # 4. Grad-CAM (Optional)
-    heatmap_b64 = None
-    if config.ENABLE_GRADCAM:
-        try:
-            # Generate heatmap for the middle frame for explanation
-            mid_idx = len(input_frames) // 2
-            mid_tensor = batch[mid_idx:mid_idx+1]
-            # OpenCV wants BGR for visualization/saving
-            original_img = cv2.cvtColor(input_frames[mid_idx], cv2.COLOR_RGB2BGR)
-
-            heatmap = make_gradcam_heatmap(mid_tensor, model, config.GRADCAM_LAYER_NAME)
-            if heatmap is not None:
-                overlay = generate_heatmap_overlay(original_img, heatmap)
-                _, buffer = cv2.imencode('.png', overlay)
-                heatmap_b64 = base64.b64encode(buffer).decode('utf-8')
-        except Exception as e:
-            print(f"Grad-CAM generation failed: {e}")
-            heatmap_b64 = None
-
     result = {
         "prediction": prediction_label,
         "confidence": confidence_score,
-        "heatmap": heatmap_b64
+        "heatmap": None,
     }
     print(f"Info:     Final prediction result: {result}")
     print("Info:     Sending prediction result")
