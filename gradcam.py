@@ -1,94 +1,150 @@
+import base64
+
+import cv2
 import numpy as np
 import torch
-import cv2
-import config
 
-class GradCAM:
-    def __init__(self, model, target_layer_name):
-        self.model = model
-        self.gradients = None
-        self.activations = None
-        
-        # Traverse the model to find the target layer
-        target_layer = self._get_layer(model, target_layer_name.split('.'))
-        
-        if target_layer is None:
-            raise ValueError(f"Target layer {target_layer_name} not found in model.")
-            
-        target_layer.register_forward_hook(self.save_activation)
-        target_layer.register_full_backward_hook(self.save_gradient)
 
-    def _get_layer(self, module, name_parts):
-        if not name_parts:
-            return module
-        if hasattr(module, name_parts[0]):
-            return self._get_layer(getattr(module, name_parts[0]), name_parts[1:])
-        return None
+def _get_layer(module: torch.nn.Module, layer_name: str) -> torch.nn.Module:
+    current: object = module
+    for part in layer_name.split("."):
+        if isinstance(current, torch.nn.ModuleDict):
+            if part not in current:
+                raise ValueError(f"Grad-CAM layer {layer_name!r} was not found.")
+            current = current[part]
+        elif isinstance(current, torch.nn.Sequential):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                raise ValueError(
+                    f"Grad-CAM layer {layer_name!r} was not found."
+                ) from None
+        elif isinstance(current, torch.nn.Module):
+            if not hasattr(current, part):
+                raise ValueError(f"Grad-CAM layer {layer_name!r} was not found.")
+            current = getattr(current, part)
+        else:
+            raise ValueError(f"Grad-CAM layer {layer_name!r} was not found.")
 
-    def save_activation(self, module, input, output):
-        self.activations = output
+    if not isinstance(current, torch.nn.Module):
+        raise ValueError(f"Grad-CAM layer {layer_name!r} is not a module.")
+    return current
 
-    def save_gradient(self, module, grad_input, grad_output):
-        self.gradients = grad_output[0]
 
-    def generate(self, input_tensor):
-        # Forward pass requires gradients for input
-        input_tensor.requires_grad = True
-        
-        self.model.zero_grad()
-        output = self.model(input_tensor)
-        
-        # For binary classification with a single logit, backprop on the sum (safe for (1,) tensors)
-        output.sum().backward(retain_graph=True)
-        
-        if self.gradients is None or self.activations is None:
-            return None
-            
-        # Get activations and gradients for the first item in batch
-        gradients = self.gradients.cpu().data.numpy()[0] # (C, H, W)
-        activations = self.activations.cpu().data.numpy()[0] # (C, H, W)
-        
-        # Global average pooling of gradients
-        weights = np.mean(gradients, axis=(1, 2)) # (C,)
-        
-        # Weight the channels
-        heatmap = np.zeros(activations.shape[1:], dtype=np.float32) # (H, W)
-        for i, w in enumerate(weights):
-            heatmap += w * activations[i]
-            
-        # ReLU (only consider positive influences) and normalize
-        heatmap = np.maximum(heatmap, 0)
-        max_val = np.max(heatmap)
-        if max_val > 0:
-            heatmap = heatmap / max_val
-            
-        return heatmap
+def _encode_overlay(image_rgb: np.ndarray, heatmap: torch.Tensor) -> str:
+    if image_rgb.ndim != 3 or image_rgb.shape[2] != 3:
+        raise ValueError("Grad-CAM images must have RGB shape (height, width, 3).")
 
-def make_gradcam_heatmap(img_tensor: torch.Tensor, model: torch.nn.Module, target_layer_name: str):
-    """
-    Generates a Grad-CAM heatmap for a given input tensor and model.
-    """
-    cam = GradCAM(model, target_layer_name)
-    heatmap = cam.generate(img_tensor)
-    return heatmap
+    image_rgb = np.asarray(image_rgb, dtype=np.uint8)
+    heatmap_array = heatmap.detach().cpu().numpy()
+    heatmap_array = np.clip(heatmap_array, 0.0, 1.0)
+    heatmap_image = np.uint8(heatmap_array * 255)
+    heatmap_image = cv2.resize(
+        heatmap_image,
+        (image_rgb.shape[1], image_rgb.shape[0]),
+        interpolation=cv2.INTER_LINEAR,
+    )
+    colored_heatmap_bgr = cv2.applyColorMap(heatmap_image, cv2.COLORMAP_JET)
+    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    overlay_bgr = cv2.addWeighted(image_bgr, 0.6, colored_heatmap_bgr, 0.4, 0)
+    success, encoded = cv2.imencode(
+        ".jpg",
+        overlay_bgr,
+        [cv2.IMWRITE_JPEG_QUALITY, 85],
+    )
+    if not success:
+        raise RuntimeError("Could not encode the Grad-CAM overlay as JPEG.")
+    return base64.b64encode(encoded.tobytes()).decode("ascii")
 
-def generate_heatmap_overlay(original_img: np.ndarray, heatmap: np.ndarray, alpha=0.4):
-    """
-    Overlays the heatmap on the original image.
-    """
-    # Rescale heatmap to a range 0-255
-    heatmap = np.uint8(255 * heatmap)
 
-    # Use jet colormap to colorize heatmap
-    jet = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+def generate_sequence_explanation(
+    sequence_tensor: torch.Tensor,
+    original_frames: list[np.ndarray],
+    model: torch.nn.Module,
+    target_layer_name: str,
+) -> dict:
+    """Generate attention-ranked, Base64-encoded Grad-CAM overlays."""
+    print(
+        f"Info:     Grad-CAM started for {sequence_tensor.shape[1] if sequence_tensor.ndim > 1 else 0} frame(s)"
+    )
+    if sequence_tensor.ndim != 5 or sequence_tensor.shape[0] != 1:
+        raise ValueError("Grad-CAM expects a sequence tensor shaped (1, T, C, H, W).")
+    if sequence_tensor.shape[1] != len(original_frames):
+        raise ValueError("The number of source frames must match the input sequence.")
 
-    # Resize heatmap to match original image size
-    jet = cv2.resize(jet, (original_img.shape[1], original_img.shape[0]))
+    print(f"Info:     Grad-CAM target layer: {target_layer_name}")
+    target_layer = _get_layer(model, target_layer_name)
+    activations: list[torch.Tensor] = []
+    gradients: list[torch.Tensor] = []
 
-    # Superimpose the heatmap on original image
-    superimposed_img = jet * alpha + original_img
-    
-    # Clip and convert back to uint8
-    superimposed_img = np.clip(superimposed_img, 0, 255).astype(np.uint8)
+    def save_activation(*hook_args):
+        output = hook_args[2]
+        activations.append(output)
+        output.register_hook(lambda gradient: gradients.append(gradient))
 
-    return superimposed_img
+    hook = target_layer.register_forward_hook(save_activation)
+    try:
+        model.zero_grad(set_to_none=True)
+        batch_size, sequence_length, channels, height, width = sequence_tensor.shape
+        frames = sequence_tensor.detach().clone().requires_grad_(True).reshape(
+            batch_size * sequence_length,
+            channels,
+            height,
+            width,
+        )
+        features = model.cnn(frames)
+        features = features.reshape(batch_size, sequence_length, -1)
+        lstm_output, _ = model.temporal_head.lstm(features)
+        attention_scores = model.temporal_head.attention["score"](lstm_output)
+        attention_weights = torch.softmax(attention_scores, dim=1).squeeze(-1)
+        context = (attention_weights.unsqueeze(-1) * lstm_output).sum(dim=1)
+        logit = model.temporal_head.classifier(context).squeeze(-1)
+        logit.sum().backward()
+    finally:
+        hook.remove()
+
+    print("Info:     Grad-CAM activations and gradients captured")
+    if len(activations) != 1 or len(gradients) != 1:
+        raise RuntimeError("Grad-CAM did not capture the target layer gradients.")
+
+    activation = activations[0]
+    gradient = gradients[0]
+    if activation.ndim != 4 or gradient.shape != activation.shape:
+        raise RuntimeError("Grad-CAM target layer did not produce image feature maps.")
+
+    channel_weights = gradient.mean(dim=(2, 3), keepdim=True)
+    heatmaps = torch.relu((channel_weights * activation).sum(dim=1))
+    heatmap_max = heatmaps.flatten(1).amax(dim=1, keepdim=True)
+    heatmaps = heatmaps / heatmap_max.clamp_min(torch.finfo(heatmaps.dtype).eps).view(-1, 1, 1)
+    gradcam_scores = heatmaps.flatten(1).mean(dim=1).detach().cpu()
+    attention = attention_weights[0].detach().cpu()
+    contribution = attention * gradcam_scores
+
+    print("Info:     Grad-CAM heatmaps calculated; encoding overlays")
+    frame_explanations = []
+    for position, frame in enumerate(original_frames):
+        frame_explanations.append({
+            "position": position,
+            "attention_weight": float(attention[position]),
+            "gradcam_score": float(gradcam_scores[position]),
+            "contribution_score": float(contribution[position]),
+            "image": {
+                "mime_type": "image/jpeg",
+                "data": _encode_overlay(frame, heatmaps[position]),
+            },
+        })
+
+    selected_position = int(torch.argmax(contribution).item())
+    selected = frame_explanations[selected_position]
+    print(
+        f"Info:     Grad-CAM selected frame position {selected_position} "
+        f"(contribution={selected['contribution_score']:.4f})"
+    )
+    return {
+        "selected_frame_position": selected_position,
+        "attention_weight": selected["attention_weight"],
+        "gradcam_score": selected["gradcam_score"],
+        "contribution_score": selected["contribution_score"],
+        "image": selected["image"],
+        "frames": frame_explanations,
+    }
