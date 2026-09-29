@@ -13,23 +13,33 @@ eval_transform = A.Compose([
 ])
 
 
-class CNNLSTMHybrid(nn.Module):
-    """EfficientNet-B0 frame features followed by temporal classification."""
+class CNNFeatureExtractor(nn.Module):
+    """Phase-1 EfficientNet-B0 feature extractor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = timm.create_model(
+            "efficientnet_b0",
+            pretrained=False,
+            num_classes=0,
+        )
+        self.feature_dim = self.backbone.num_features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone(x)
+
+
+class TemporalAttentionLSTM(nn.Module):
+    """Attention-weighted LSTM head from the phase-2 checkpoint."""
 
     def __init__(
         self,
-        cnn: nn.Module,
         input_size: int = 1280,
         hidden_size: int = 256,
         num_layers: int = 2,
         dropout: float = 0.3,
-    ):
+    ) -> None:
         super().__init__()
-        self.cnn = cnn
-
-        for parameter in self.cnn.parameters():
-            parameter.requires_grad = False
-
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -37,12 +47,42 @@ class CNNLSTMHybrid(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
         )
+        self.attention = nn.ModuleDict({
+            "score": nn.Sequential(
+                nn.Linear(hidden_size, 128),
+                nn.Tanh(),
+                nn.Linear(128, 1),
+            ),
+        })
         self.classifier = nn.Sequential(
             nn.Linear(hidden_size, 128),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(128, 1),
         )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        lstm_output, _ = self.lstm(features)
+        attention_scores = self.attention["score"](lstm_output)
+        attention_weights = torch.softmax(attention_scores, dim=1)
+        context = (attention_weights * lstm_output).sum(dim=1)
+        return self.classifier(context).squeeze(-1)
+
+
+class CNNAttentionLSTM(nn.Module):
+    """EfficientNet-B0 frames followed by the phase-2 attention head."""
+
+    def __init__(
+        self,
+        cnn: CNNFeatureExtractor,
+        temporal_head: TemporalAttentionLSTM,
+    ) -> None:
+        super().__init__()
+        self.cnn = cnn
+        self.temporal_head = temporal_head
+
+        for parameter in self.cnn.parameters():
+            parameter.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, channels, height, width = x.shape
@@ -57,13 +97,39 @@ class CNNLSTMHybrid(nn.Module):
             features = self.cnn(frames)
 
         features = features.reshape(batch_size, sequence_length, -1)
-        lstm_output, _ = self.lstm(features)
-        last_output = lstm_output[:, -1, :]
-        return self.classifier(last_output).squeeze(-1)
+        return self.temporal_head(features)
 
 
-model: CNNLSTMHybrid | None = None
+model: CNNAttentionLSTM | None = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _load_state_dict(path: str) -> dict:
+    checkpoint = torch.load(path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        return checkpoint
+    if isinstance(checkpoint, dict):
+        return {"model_state_dict": checkpoint}
+    raise TypeError(f"Checkpoint at {path} is not a state dictionary.")
+
+
+def _load_backbone() -> CNNFeatureExtractor:
+    checkpoint = _load_state_dict(config.CNN_BACKBONE_PATH)
+    backbone_state = checkpoint["model_state_dict"]
+    state_dict = {
+        key.removeprefix("backbone."): value
+        for key, value in backbone_state.items()
+        if key.startswith("backbone.")
+    }
+    if not state_dict:
+        raise RuntimeError(
+            f"CNN checkpoint {config.CNN_BACKBONE_PATH} has no backbone weights."
+        )
+
+    cnn = CNNFeatureExtractor()
+    cnn.backbone.load_state_dict(state_dict)
+    cnn.eval()
+    return cnn
 
 
 def load_model() -> None:
@@ -73,41 +139,23 @@ def load_model() -> None:
         return
 
     try:
-        print(f"Info:     Loading model from {config.MODEL_PATH}...")
-        cnn = timm.create_model(
-            "efficientnet_b0",
-            pretrained=False,
-            num_classes=0,
-        )
-        checkpoint = torch.load(config.MODEL_PATH, map_location=device)
+        print(f"Info:     Loading CNN backbone from {config.CNN_BACKBONE_PATH}...")
+        cnn = _load_backbone()
 
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            state_dict = checkpoint["model_state_dict"]
-            input_size = checkpoint.get("input_size", 1280)
-            hidden_size = checkpoint.get("hidden_size", 256)
-            num_layers = checkpoint.get("num_layers", 2)
-            dropout = checkpoint.get("dropout", 0.3)
-        else:
-            state_dict = checkpoint
-            input_size = 1280
-            hidden_size = 256
-            num_layers = 2
-            dropout = 0.3
-
-        model = CNNLSTMHybrid(
-            cnn=cnn,
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            dropout=dropout,
+        print(f"Info:     Loading attention head from {config.MODEL_PATH}...")
+        attention_checkpoint = _load_state_dict(config.MODEL_PATH)
+        temporal_head = TemporalAttentionLSTM()
+        temporal_head.load_state_dict(
+            attention_checkpoint["model_state_dict"]
         )
-        model.load_state_dict(state_dict)
+
+        model = CNNAttentionLSTM(cnn=cnn, temporal_head=temporal_head)
         model.to(device).eval()
-        print("Info:     CNN + LSTM model loaded successfully.")
+        print("Info:     CNN + attention LSTM model loaded successfully.")
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         model = None
         raise RuntimeError(
-            f"Could not load CNN + LSTM model from {config.MODEL_PATH}: {exc}"
+            f"Could not load CNN + attention LSTM model: {exc}"
         ) from exc
 
 
@@ -128,8 +176,8 @@ def run_inference(input_frames: list) -> dict:
 
     if model is None:
         load_model()
-        if model is None:
-            raise RuntimeError("Model is not loaded.")
+    if model is None:
+        raise RuntimeError("Model is not loaded.")
 
     tensors = [
         eval_transform(image=frame)["image"]

@@ -20,6 +20,8 @@ GRADCAM_LAYER_NAME = "cnn.backbone.conv_head"
 # ========== PATHS ==========
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "model")
-# Set this to the final CNN + LSTM checkpoint filename.
-MODEL_FILENAME = "truveoai_cnn_lstm_hybrid.pt"
+# Phase-2 attention head and phase-1 CNN backbone checkpoints.
+MODEL_FILENAME = "truveoai_lstm_attention.pt"
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
+CNN_BACKBONE_FILENAME = "cnn_backbone.pt"
+CNN_BACKBONE_PATH = os.path.join(MODEL_DIR, CNN_BACKBONE_FILENAME)
