@@ -81,13 +81,15 @@ def detect_and_align_face(image_bgr: np.ndarray, target_size: int = 224, max_rot
         return None
 
 
-def process_video(video_path: str):
+def process_video(video_path: str, update_stage=None):
     """
     Full pipeline: Extract frames -> Detect/Crop Faces -> Build Sequence
     Returns: numpy array of shape (1, SEQUENCE_LENGTH, HEIGHT, WIDTH, 3)
     Or raises ValueError if validation fails.
     """
     print("Info:     Called Face Extraction")
+    if update_stage:
+        update_stage(2)
     raw_frames = extract_frames(video_path)
 
     if not raw_frames:
@@ -96,6 +98,8 @@ def process_video(video_path: str):
     print("Info:     Frame Extraction Completed")
     processed_faces = []
     print("Info:     RetinaFace Called")
+    if update_stage:
+        update_stage(3)
     for frame in raw_frames:
         face_bgr = detect_and_align_face(frame, target_size=config.INPUT_WIDTH, max_rotation_deg=config.MAX_ROTATION_DEG)
         if face_bgr is not None:
@@ -103,6 +107,8 @@ def process_video(video_path: str):
             processed_faces.append(face_rgb)
 
     print("Info:     RetinaFace Completed")
+    if update_stage:
+        update_stage(4)
     if not processed_faces:
         raise ValueError("No faces detected in the video.")
 

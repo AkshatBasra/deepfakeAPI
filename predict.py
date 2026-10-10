@@ -160,7 +160,7 @@ def load_model() -> None:
         ) from exc
 
 
-def run_inference(input_frames: list) -> dict:
+def run_inference(input_frames: list, update_stage=None) -> dict:
     """
     Predict whether an eight-frame RGB face sequence is fake or real.
 
@@ -180,6 +180,7 @@ def run_inference(input_frames: list) -> dict:
     if model is None:
         raise RuntimeError("Model is not loaded.")
 
+    update_stage and update_stage(5)
     tensors = [
         eval_transform(image=frame)["image"]
         for frame in input_frames
@@ -190,6 +191,7 @@ def run_inference(input_frames: list) -> dict:
     print(f"Info:     Inference input shape: {tuple(sequence.shape)}")
     print(f"Info:     Inference device: {device}")
 
+    update_stage and update_stage(6)
     try:
         with torch.no_grad():
             logit = model(sequence)
@@ -203,6 +205,7 @@ def run_inference(input_frames: list) -> dict:
     prediction_label = "fake" if is_fake else "real"
     heatmap = None
     if config.ENABLE_GRADCAM:
+        update_stage and update_stage(7)
         print("Info:     Grad-CAM enabled; generating explanation")
         try:
             heatmap = gradcam.generate_sequence_explanation(
