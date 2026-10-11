@@ -4,6 +4,8 @@ SEQUENCE_LENGTH = 8         # Number of frames to extract
 INPUT_HEIGHT = 224          # Face image height
 INPUT_WIDTH = 224           # Face image width
 MAX_VIDEO_DURATION = 45     # Maximum video duration in seconds
+JOB_RESULT_TTL_SECONDS = 60 * 60
+JOB_CLEANUP_INTERVAL_SECONDS = 5 * 60
 FACE_MARGIN = 0.15          # 15% margin for face cropping
 MAX_ROTATION_DEG = 40.0     # Maximum face rotation in degrees
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -13,12 +15,14 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 FAKE_THRESHOLD = 0.5        # Threshold for "fake" classification
 
 # ========== GRAD-CAM ==========
-ENABLE_GRADCAM = False      # Enable/Disable Grad-CAM
-# NOTE: Update this layer name to match the last convolutional layer of your specific model
-GRADCAM_LAYER_NAME = "cnn.backbone.conv_head" 
+ENABLE_GRADCAM = True
+# GRADCAM_LAYER_NAME = "cnn.backbone.blocks.6.0.conv_pwl"
+GRADCAM_LAYER_NAME = "cnn.backbone.blocks.5.0.conv_pwl"
 
 # ========== PATHS ==========
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TMP_DIR = os.path.join(BASE_DIR, "tmp")
+JOB_STORE_DIR = os.path.join(TMP_DIR, "jobs")
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 # Phase-2 attention head and phase-1 CNN backbone checkpoints.
 MODEL_FILENAME = "truveoai_lstm_attention.pt"

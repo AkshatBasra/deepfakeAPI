@@ -5,6 +5,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 import config
+import gradcam
 
 
 eval_transform = A.Compose([
@@ -81,7 +82,7 @@ class CNNAttentionLSTM(nn.Module):
         self.cnn = cnn
         self.temporal_head = temporal_head
 
-        for parameter in self.cnn.parameters():
+        for parameter in self.parameters():
             parameter.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -159,7 +160,7 @@ def load_model() -> None:
         ) from exc
 
 
-def run_inference(input_frames: list) -> dict:
+def run_inference(input_frames: list, update_stage=None) -> dict:
     """
     Predict whether an eight-frame RGB face sequence is fake or real.
 
@@ -179,15 +180,18 @@ def run_inference(input_frames: list) -> dict:
     if model is None:
         raise RuntimeError("Model is not loaded.")
 
+    update_stage and update_stage(5)
     tensors = [
         eval_transform(image=frame)["image"]
         for frame in input_frames
     ]
     sequence = torch.stack(tensors).unsqueeze(0).to(device)
 
+    print("Info:     Input frames transformed successfully")
     print(f"Info:     Inference input shape: {tuple(sequence.shape)}")
     print(f"Info:     Inference device: {device}")
 
+    update_stage and update_stage(6)
     try:
         with torch.no_grad():
             logit = model(sequence)
@@ -199,11 +203,32 @@ def run_inference(input_frames: list) -> dict:
 
     is_fake = confidence_score >= config.FAKE_THRESHOLD
     prediction_label = "fake" if is_fake else "real"
+    heatmap = None
+    if config.ENABLE_GRADCAM:
+        update_stage and update_stage(7)
+        print("Info:     Grad-CAM enabled; generating explanation")
+        try:
+            heatmap = gradcam.generate_sequence_explanation(
+                sequence_tensor=sequence,
+                original_frames=input_frames,
+                model=model,
+                target_layer_name=config.GRADCAM_LAYER_NAME,
+            )
+        except (RuntimeError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"Grad-CAM generation failed: {exc}") from exc
+        print("Info:     Grad-CAM explanation completed")
+    else:
+        print("Info:     Grad-CAM disabled")
+
     result = {
         "prediction": prediction_label,
         "confidence": confidence_score,
-        "heatmap": None,
+        "heatmap": heatmap,
     }
-    print(f"Info:     Final prediction result: {result}")
+    print(
+        f"Info:     Final prediction: {prediction_label} "
+        f"(confidence={confidence_score:.4f}, "
+        f"heatmap={'available' if heatmap is not None else 'disabled'})"
+    )
     print("Info:     Sending prediction result")
     return result
