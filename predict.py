@@ -1,3 +1,5 @@
+import threading
+
 import torch
 import torch.nn as nn
 import timm
@@ -51,8 +53,38 @@ class DeepfakeDetectorPhase1(nn.Module):
 
 model = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+gradcam_lock = threading.Lock()
 
-def load_model():
+
+def _load_state_dict(path: str) -> dict:
+    checkpoint = torch.load(path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        return checkpoint
+    if isinstance(checkpoint, dict):
+        return {"model_state_dict": checkpoint}
+    raise TypeError(f"Checkpoint at {path} is not a state dictionary.")
+
+
+def _load_backbone() -> CNNFeatureExtractor:
+    checkpoint = _load_state_dict(config.CNN_BACKBONE_PATH)
+    backbone_state = checkpoint["model_state_dict"]
+    state_dict = {
+        key.removeprefix("backbone."): value
+        for key, value in backbone_state.items()
+        if key.startswith("backbone.")
+    }
+    if not state_dict:
+        raise RuntimeError(
+            f"CNN checkpoint {config.CNN_BACKBONE_PATH} has no backbone weights."
+        )
+
+    cnn = CNNFeatureExtractor()
+    cnn.backbone.load_state_dict(state_dict)
+    cnn.eval()
+    return cnn
+
+
+def load_model() -> None:
     global model
     if model is None:
         if config.DEV_NO_MODEL:
@@ -132,21 +164,23 @@ def run_inference(input_frames: list):
     # 4. Grad-CAM (Optional)
     heatmap_b64 = None
     if config.ENABLE_GRADCAM:
+        update_stage and update_stage(7)
+        print("Info:     Grad-CAM enabled; generating explanation")
         try:
-            # Generate heatmap for the middle frame for explanation
-            mid_idx = len(input_frames) // 2
-            mid_tensor = batch[mid_idx:mid_idx+1]
-            # OpenCV wants BGR for visualization/saving
-            original_img = cv2.cvtColor(input_frames[mid_idx], cv2.COLOR_RGB2BGR)
-
-            heatmap = make_gradcam_heatmap(mid_tensor, model, config.GRADCAM_LAYER_NAME)
-            if heatmap is not None:
-                overlay = generate_heatmap_overlay(original_img, heatmap)
-                _, buffer = cv2.imencode('.png', overlay)
-                heatmap_b64 = base64.b64encode(buffer).decode('utf-8')
-        except Exception as e:
-            print(f"Grad-CAM generation failed: {e}")
-            heatmap_b64 = None
+            # Grad-CAM uses shared model hooks and gradients, so concurrent
+            # jobs must not run explanation generation at the same time.
+            with gradcam_lock:
+                heatmap = gradcam.generate_sequence_explanation(
+                    sequence_tensor=sequence,
+                    original_frames=input_frames,
+                    model=model,
+                    target_layer_name=config.GRADCAM_LAYER_NAME,
+                )
+        except (RuntimeError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"Grad-CAM generation failed: {exc}") from exc
+        print("Info:     Grad-CAM explanation completed")
+    else:
+        print("Info:     Grad-CAM disabled")
 
     result = {
         "prediction": prediction_label,
