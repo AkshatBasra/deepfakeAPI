@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import tempfile
 import uuid
 
@@ -9,6 +10,8 @@ from fastapi.responses import JSONResponse
 import uvicorn
 
 import face_extraction
+import config
+from job_store import JobStore
 import predict
 import utils
 
@@ -23,19 +26,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = "tmp"
-JOB_STORE = {}
+UPLOAD_DIR = config.TMP_DIR
+JOB_STORE = JobStore(config.JOB_STORE_DIR, config.JOB_RESULT_TTL_SECONDS)
+cleanup_task: asyncio.Task[None] | None = None
 
 
-def process_prediction(video_path: str):
-    """Run the phase-1 RetinaFace + CNN inference pipeline for a saved video."""
+def process_prediction(video_path: str, update_stage):
+    """Run the phase-2 RetinaFace + CNN + LSTM pipeline for a saved video."""
     # 1. Check Duration
+    update_stage(1)
     duration = utils.check_video_duration(video_path)
+    if duration > config.MAX_VIDEO_DURATION:
+        print("Error:    Input File too long")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Video too long. Max duration is {config.MAX_VIDEO_DURATION} seconds.",
+        )
     print("Info:     Input File Validated")
 
     # 2. Face Extraction & Preprocessing
     try:
-        input_batch = face_extraction.process_video(video_path)
+        input_batch = face_extraction.process_video(
+            video_path,
+            update_stage=update_stage,
+        )
     except ValueError as e:
         print("Error:    No Face Detected")
         raise HTTPException(status_code=400, detail=str(e))
@@ -43,30 +57,36 @@ def process_prediction(video_path: str):
     print("Info:     Face Extraction Completed")
 
     # 3. Inference
-    result = predict.run_inference(input_batch)
+    result = predict.run_inference(input_batch, update_stage=update_stage)
     print("Info:    Detection Completed")
     return result
 
 
 async def run_prediction_job(job_id: str, video_path: str):
-    job = JOB_STORE.get(job_id)
-    if job is None:
-        return
+    def update_stage(stage: int) -> None:
+        JOB_STORE.update_stage(job_id, stage)
 
     try:
-        result = await asyncio.to_thread(process_prediction, video_path)
-        job["status"] = "completed"
-        job["result"] = result
+        result = await asyncio.to_thread(
+            process_prediction,
+            video_path,
+            update_stage,
+        )
+        JOB_STORE.complete(job_id, result)
     except HTTPException as exc:
-        job["status"] = "failed"
-        job["error"] = exc.detail
+        JOB_STORE.fail(job_id, str(exc.detail))
     except Exception as exc:
         import traceback
         traceback.print_exc()
-        job["status"] = "failed"
-        job["error"] = str(exc)
+        JOB_STORE.fail(job_id, str(exc))
     finally:
         utils.cleanup_tmp_file(video_path)
+
+
+async def cleanup_jobs() -> None:
+    while True:
+        await asyncio.sleep(config.JOB_CLEANUP_INTERVAL_SECONDS)
+        await asyncio.to_thread(JOB_STORE.cleanup_expired)
 
 
 @app.get("/")
@@ -78,9 +98,13 @@ async def root():
 async def startup_event():
     # Load model on startup to fail fast if missing/invalid
     predict.load_model()
-    # Ensure temporary upload dir exists
-    if not os.path.exists(UPLOAD_DIR):
-        os.makedirs(UPLOAD_DIR)
+    # Start with a clean temporary workspace on every process start.
+    if os.path.exists(UPLOAD_DIR):
+        shutil.rmtree(UPLOAD_DIR)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    JOB_STORE.initialize()
+    global cleanup_task
+    cleanup_task = asyncio.create_task(cleanup_jobs())
 
 
 @app.post("/predict")
@@ -106,25 +130,22 @@ async def predict_endpoint(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Failed to save uploaded file")
 
     job_id = str(uuid.uuid4())
-    JOB_STORE[job_id] = {"job_id": job_id, "status": "processing"}
+    JOB_STORE.create(job_id)
     asyncio.create_task(run_prediction_job(job_id, temp_path))
 
-    return JSONResponse(status_code=202, content={"job_id": job_id, "status": "processing"})
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "status": "processing", "stage": 0},
+    )
 
 
 @app.get("/predict/{job_id}")
 async def get_prediction_status(job_id: str):
-    job = JOB_STORE.get(job_id)
+    job = await asyncio.to_thread(JOB_STORE.get, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    response = {"job_id": job_id, "status": job["status"]}
-    if job["status"] == "completed":
-        response["result"] = job.get("result")
-    elif job["status"] == "failed":
-        response["error"] = job.get("error", "Unknown error")
-
-    return response
+    return job
 
 
 if __name__ == "__main__":
