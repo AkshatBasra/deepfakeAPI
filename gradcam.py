@@ -79,6 +79,10 @@ def generate_sequence_explanation(
 
     def save_activation(*hook_args):
         output = hook_args[2]
+        if not isinstance(output, torch.Tensor) or not output.requires_grad:
+            raise RuntimeError(
+                "Grad-CAM target layer output does not require gradients."
+            )
         activations.append(output)
         output.register_hook(lambda gradient: gradients.append(gradient))
 
@@ -92,9 +96,11 @@ def generate_sequence_explanation(
             height,
             width,
         )
+        # Grad mode is thread-local, so explicitly enable it for request
+        # workers even when another inference path uses no_grad().
         # cuDNN RNN backward is unsupported in eval mode. Keep the model in
         # eval mode and use native PyTorch kernels for this gradient pass.
-        with torch.backends.cudnn.flags(enabled=False):
+        with torch.enable_grad(), torch.backends.cudnn.flags(enabled=False):
             features = model.cnn(frames)
             features = features.reshape(batch_size, sequence_length, -1)
             lstm_output, _ = model.temporal_head.lstm(features)
